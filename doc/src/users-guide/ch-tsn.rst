@@ -377,6 +377,94 @@ parameter called :par:`hasStreamRedundancy` which can be used to enable frame
 replication in the network node architecture. Of course, these modules can also
 be used in other ways.
 
+Vector Sequence Recovery
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default :ned:`StreamMerger` remembers a finite list of received sequence
+numbers. To use the Vector Recovery Algorithm from IEEE Std 802.1CB-2017,
+select :ned:`VectorStreamMerger` in the existing stream relay layer:
+
+.. code-block:: ini
+
+   *.*.bridging.streamRelay.merger.typename = "VectorStreamMerger"
+   *.*.bridging.streamRelay.merger.historyLength = 32
+   *.*.bridging.streamRelay.merger.resetTimeout = 100ms
+   *.*.bridging.streamRelay.merger.ticksPerSecond = 1000
+
+Existing merger mappings still apply. Inputs mapped to the same output stream
+share recovery state, and must use sequence numbers from the same generation
+instance. Separate output stream names have separate history and timers. Mapping
+to an empty output name removes the stream and sequence indication tags after
+recovery. Mutable mappings retain state for existing output names, discard state
+for removed names, and initialize new output names.
+
+When several independently numbered compound streams must all have their tags
+removed at one destination, give them separate recovery instance names using
+``recoveryMapping``. For example:
+
+.. code-block:: ini
+
+   *.destination.bridging.streamRelay.merger.mapping = {a1: "", b1: "", a2: "", b2: ""}
+   *.destination.bridging.streamRelay.merger.recoveryMapping = {a1: "flow1", b1: "flow1", a2: "flow2", b2: "flow2"}
+
+Recovery state is then shared by ``a1`` and ``b1``, and separately by ``a2`` and
+``b2``, even though all four outputs remove tags. Without an explicit entry in
+``recoveryMapping``, the output stream name remains the recovery instance name.
+Mutable changes retain existing instance names and initialize new ones.
+
+``historyLength`` is ``frerSeqRcvyHistoryLength`` (default 2; supported range
+2..32768). The history tracks consecutive sequence-number positions, including
+unreceived gaps, and comparisons wrap modulo 65536. After initialization or reset,
+the first numbered frame is accepted. Subsequently, an arrival's signed difference
+from the reference must satisfy ``-historyLength < delta <= historyLength``,
+including the forward-boundary correction in IEEE 802.1CBdb-2021 (maintenance
+item 0257). The half-space difference 32768 is interpreted as -32768 and rejected. A previously
+unseen frame within the history is forwarded immediately, even when out of order.
+Previously received numbers are discarded. Frames outside the interval are
+counted as rogue frames.
+
+``resetTimeout`` is ``frerSeqRcvyResetMSec``, a nonnegative integer number of
+milliseconds. Its default of 100ms is a model choice. ``ticksPerSecond`` must be
+at least 100; the timeout is rounded up to whole ticks. The timer runs after an
+accepted frame and is reloaded only on actual packet processing, not admission
+queries. A timeout precedes ordinary frame-arrival events at the same simulation
+time. Expiration resets the history and allows a new initial sequence number.
+A delayed duplicate arriving after reset can therefore be accepted. A timeout
+of zero leaves the timer inactive, matching the absence of a 1-to-0 tick transition
+in 7.4.3.2.4.
+
+``takeNoSequence`` corresponds to ``frerSeqRcvyTakeNoSequence``. The default is
+false. When true, frames without a valid sequence number pass and reload the
+timer, without updating the reference or history. Valid ``SequenceNumberInd``
+values are 0..65535; an absent tag or a value outside this range is treated as
+tagless. The R-tag decoder supplies the 16-bit on-wire number. When connecting
+directly to a custom producer, supply the same 16-bit number in the indication.
+Frames with no stream indication or no matching mapping bypass recovery.
+
+Set ``individualRecovery = true`` only for an individual member-stream recovery
+function (7.5), with one input stream per distinct recovery instance. Numbered
+duplicates and rogue frames then reload the timer as well. Use a separate module
+instance for recovery across the merged member streams.
+
+The module requires complete frames after lower-layer validity checks and rejects
+streaming/cut-through operations (7.4.3). Backpressure must remain false.
+The inherited ``bufferSize`` parameter is unused. Module-level scalar results
+``recoveryPassedPackets``, ``recoveryDiscardedPackets``, ``recoveryRoguePackets``,
+``recoveryOutOfOrderPackets``, ``recoveryLostPackets``, ``recoveryTaglessPackets``
+and ``recoveryResets`` aggregate all configured recovery instances. These are
+cumulative signals with NED ``last`` statistics; scalar results use the suffix
+``:last``. Signals can also be recorded as vectors through normal configuration.
+
+The implementation follows the 2017 functions with the CBdb-2021 forward-boundary
+correction, including the loss
+counter increment when a zero bit leaves history. Initial zero bits can therefore
+be counted as losses after reset. This module does not implement latent error
+detection, MRA, the management tables, or amendment requirements beyond that
+correction and does not claim
+full IEEE 802.1CB conformance. See ``showcases/tsn/framereplication/vectorrecovery``
+for an example and the ``VectorSequenceRecovery`` C++ class for reuse of the
+packet-independent algorithm by other modules.
+
 .. _ug:sec:tsn:framepreemption:
 
 Frame Preemption
